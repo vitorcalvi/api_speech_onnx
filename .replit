@@ -33,9 +33,9 @@ enabledForHosting = false
 packageSearch = true
 guessImports = true
 
-[ports]
-5000 = { externalPort = 80 }
-8000 = { externalPort = 80 }
+[[ports]]
+localPort = 8000
+externalPort = 80
 
 [unitTest]
 language = "python3"
