@@ -1,11 +1,12 @@
-run = "python main.py"
+entrypoint = "main.py"
+run = "uvicorn main:app --host 0.0.0.0 --port 8000"
 modules = ["python-3.11"]
 
 [nix]
-channel = "stable-22_11"
+channel = "stable-23_05"
 
 [deployment]
-run = ["sh", "-c", "python main.py"]
+run = ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port 80"]
 deploymentTarget = "cloudrun"
 
 [languages]

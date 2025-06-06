@@ -414,6 +414,7 @@ async def global_exception_handler(request, exc):
         }
     )
 
+# API Routes
 @app.post("/analyze_audio")
 async def analyze_audio(audio_file: UploadFile = File(...)):
     """Enhanced audio analysis with ehcalabres model"""
@@ -742,6 +743,7 @@ async def get_web_interface():
     </html>
     """
 
+
 if __name__ == "__main__":
     import uvicorn
     
@@ -749,25 +751,17 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     host = "0.0.0.0"
     
-    # Check if running on Replit
-    is_replit = 'REPL_ID' in os.environ
+    # For deployment, Replit expects port 80
+    if os.environ.get('REPL_DEPLOYMENT') == 'true':
+        port = 80
     
-    if is_replit:
-        repl_slug = os.environ.get('REPL_SLUG', 'emotion-recognition')
-        repl_owner = os.environ.get('REPL_OWNER', 'user')
-        logger.info(f"🚀 Starting enhanced ehcalabres Wav2Vec2 emotion recognition on Replit...")
-        logger.info(f"🌐 Public URL: https://{repl_slug}.{repl_owner}.repl.co")
-        logger.info(f"📊 Web Interface: https://{repl_slug}.{repl_owner}.repl.co/")
-        logger.info(f"🏥 Health Check: https://{repl_slug}.{repl_owner}.repl.co/health")
-    else:
-        logger.info("Starting enhanced ehcalabres Wav2Vec2 emotion recognition server...")
-        logger.info(f"🌐 Local URL: http://localhost:{port}")
+    logger.info(f"Starting server on {host}:{port}")
     
     uvicorn.run(
         app, 
         host=host, 
         port=port, 
         log_level="info",
-        reload=False,  # Disable reload on Replit for stability
+        reload=False,
         access_log=True
     )
