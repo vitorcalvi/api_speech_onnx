@@ -744,5 +744,30 @@ async def get_web_interface():
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("Starting enhanced ehcalabres Wav2Vec2 emotion recognition server...")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    
+    # Replit environment detection and port configuration
+    port = int(os.environ.get("PORT", 8000))
+    host = "0.0.0.0"
+    
+    # Check if running on Replit
+    is_replit = 'REPL_ID' in os.environ
+    
+    if is_replit:
+        repl_slug = os.environ.get('REPL_SLUG', 'emotion-recognition')
+        repl_owner = os.environ.get('REPL_OWNER', 'user')
+        logger.info(f"🚀 Starting enhanced ehcalabres Wav2Vec2 emotion recognition on Replit...")
+        logger.info(f"🌐 Public URL: https://{repl_slug}.{repl_owner}.repl.co")
+        logger.info(f"📊 Web Interface: https://{repl_slug}.{repl_owner}.repl.co/")
+        logger.info(f"🏥 Health Check: https://{repl_slug}.{repl_owner}.repl.co/health")
+    else:
+        logger.info("Starting enhanced ehcalabres Wav2Vec2 emotion recognition server...")
+        logger.info(f"🌐 Local URL: http://localhost:{port}")
+    
+    uvicorn.run(
+        app, 
+        host=host, 
+        port=port, 
+        log_level="info",
+        reload=False,  # Disable reload on Replit for stability
+        access_log=True
+    )
