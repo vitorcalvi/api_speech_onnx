@@ -1,8 +1,17 @@
-fastapi
-uvicorn
-onnxruntime
+# Core web framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# PyTorch (CPU only)
+torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu
+torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cpu
+transformers==4.35.0
+
+# Audio processing
 soundfile
+scipy
+
+# Core dependencies
 numpy
 python-multipart
-librosa
-torch
+onnxruntime

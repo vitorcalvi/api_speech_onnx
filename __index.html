@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Speech Emotion Analysis</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+        background: #f5f5f5;
+      }
+      .container {
+        background: white;
+        border-radius: 12px;
+        padding: 2rem;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      }
+      .status {
+        padding: 10px;
+        margin: 10px 0;
+        border-radius: 5px;
+      }
+      .success {
+        background: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+      }
+      .warning {
+        background: #fff3cd;
+        color: #856404;
+        border: 1px solid #ffeeba;
+      }
+      .error {
+        background: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+      }
+      button {
+        background: #007bff;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 5px;
+        cursor: pointer;
+        margin: 5px;
+      }
+      button:hover {
+        background: #0056b3;
+      }
+      button:disabled {
+        background: #6c757d;
+        cursor: not-allowed;
+      }
+      .file-input {
+        margin: 10px 0;
+      }
+      .results {
+        margin: 20px 0;
+        padding: 15px;
+        background: #f8f9fa;
+        border-radius: 8px;
+      }
+      .emotion-item {
+        display: flex;
+        justify-content: space-between;
+        margin: 5px 0;
+        padding: 5px;
+        background: white;
+        border-radius: 3px;
+      }
+      .log {
+        background: #2c3e50;
+        color: #ecf0f1;
+        padding: 15px;
+        border-radius: 5px;
+        height: 200px;
+        overflow-y: auto;
+        font-family: monospace;
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🗣️ Speech Emotion Analysis</h1>
+      <p>Real-time emotion recognition</p>
+
+      <div id="statusIndicator" class="status warning">
+        Initializing system...
+      </div>
+
+      <div id="mainContent">
+        <div class="file-input">
+          <label for="audioFile">Upload Audio File:</label><br />
+          <input type="file" id="audioFile" accept="audio/*" />
+          <button id="analyzeBtn" onclick="analyzeAudioFile()" disabled>
+            🔍 Analyze File
+          </button>
+          <button id="recordBtn" onclick="toggleRecording()">
+            🎤 Start Recording
+          </button>
+        </div>
+
+        <div class="results" id="resultsPanel">
+          <h3>Emotion Analysis Results</h3>
+          <div id="emotionResults">No analysis yet...</div>
+          <div id="dominantEmotion">Dominant: None</div>
+          <div id="confidence">Confidence: 0%</div>
+        </div>
+
+        <div class="log" id="logPanel">
+          <div>[System] Initializing...</div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      let isRecording = false;
+      let websocket = null;
+      let mediaRecorder = null;
+      let audioContext = null;
+
+      // Initialize application
+      document.addEventListener('DOMContentLoaded', function () {
+        initializeApplication();
+      });
+
+      async function initializeApplication() {
+        try {
+          logMessage('Checking server status...', 'info');
+
+          // Check if the emotion recognition server is available
+          const response = await fetch('http://localhost:8000/health');
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          const healthData = await response.json();
+
+          if (healthData.model_status === 'available') {
+            updateStatus('System ready - Model loaded successfully', 'success');
+            logMessage(`Model loaded: ${healthData.model_type}`, 'success');
+            document.getElementById('analyzeBtn').disabled = false;
+            enableMainContent();
+          } else {
+            updateStatus('System ready but model unavailable', 'warning');
+            logMessage('Model unavailable - check installation', 'error');
+            enableMainContent();
+          }
+        } catch (error) {
+          updateStatus(`Server error: ${error.message}`, 'error');
+          logMessage(`Server connection failed: ${error.message}`, 'error');
+        }
+      }
+
+      function enableMainContent() {
+        // Setup event listeners
+        const audioFile = document.getElementById('audioFile');
+        audioFile.addEventListener('change', function (e) {
+          const analyzeBtn = document.getElementById('analyzeBtn');
+          analyzeBtn.disabled = !e.target.files.length;
+          if (e.target.files.length > 0) {
+            logMessage(`File selected: ${e.target.files[0].name}`, 'info');
+          }
+        });
+      }
+
+      async function analyzeAudioFile() {
+        const fileInput = document.getElementById('audioFile');
+        if (!fileInput.files.length) {
+          logMessage('No file selected', 'error');
+          return;
+        }
+
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        analyzeBtn.disabled = true;
+        analyzeBtn.textContent = '🔄 Analyzing...';
+
+        try {
+          const formData = new FormData();
+          formData.append('audio_file', fileInput.files[0]);
+
+          logMessage('Uploading file for analysis...', 'info');
+          const response = await fetch('http://localhost:8000/analyze_audio', {
+            method: 'POST',
+            body: formData
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+          }
+
+          const result = await response.json();
+          displayResults(result.result);
+          logMessage('File analysis completed successfully', 'success');
+        } catch (error) {
+          logMessage(`Analysis failed: ${error.message}`, 'error');
+          updateStatus(`Analysis error: ${error.message}`, 'error');
+        } finally {
+          analyzeBtn.disabled = false;
+          analyzeBtn.textContent = '🔍 Analyze File';
+        }
+      }
+
+      function displayResults(result) {
+        const emotionResults = document.getElementById('emotionResults');
+        const dominantEmotion = document.getElementById('dominantEmotion');
+        const confidence = document.getElementById('confidence');
+
+        let html = '';
+        for (const [emotion, score] of Object.entries(result.emotions)) {
+          const percentage = (score * 100).toFixed(1);
+          html += `
+                    <div class="emotion-item">
+                        <span>${emotion}</span>
+                        <span>${percentage}%</span>
+                    </div>
+                `;
+        }
+        emotionResults.innerHTML = html;
+
+        const confidencePercent = (result.confidence * 100).toFixed(1);
+        dominantEmotion.textContent = `Dominant: ${result.dominant_emotion}`;
+        confidence.textContent = `Confidence: ${confidencePercent}%`;
+
+        logMessage(
+          `Analysis complete: ${result.dominant_emotion} (${confidencePercent}%)`,
+          'success'
+        );
+      }
+
+      function toggleRecording() {
+        logMessage('Recording functionality coming soon...', 'info');
+      }
+
+      function logMessage(message, type = 'info') {
+        const logPanel = document.getElementById('logPanel');
+        const timestamp = new Date().toLocaleTimeString();
+        const logEntry = document.createElement('div');
+
+        const typeColors = {
+          info: '#3498db',
+          success: '#27ae60',
+          error: '#e74c3c',
+          warning: '#f39c12'
+        };
+
+        logEntry.innerHTML = `
+                <span style="color: #95a5a6;">[${timestamp}]</span>
+                <span style="color: ${
+                  typeColors[type] || '#ecf0f1'
+                };">${message}</span>
+            `;
+
+        logPanel.appendChild(logEntry);
+        logPanel.scrollTop = logPanel.scrollHeight;
+      }
+
+      function updateStatus(message, type) {
+        const statusIndicator = document.getElementById('statusIndicator');
+        statusIndicator.className = `status ${type}`;
+        statusIndicator.textContent = message;
+      }
+
+      function showErrorMessage(message) {
+        const errorDiv = document.createElement('div');
+        errorDiv.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: #f56565;
+                color: white;
+                padding: 15px 20px;
+                border-radius: 8px;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+                z-index: 10001;
+                max-width: 300px;
+            `;
+        errorDiv.textContent = message;
+        document.body.appendChild(errorDiv);
+
+        setTimeout(() => {
+          if (document.body.contains(errorDiv)) {
+            document.body.removeChild(errorDiv);
+          }
+        }, 5000);
+      }
+    </script>
+  </body>
+</html>
