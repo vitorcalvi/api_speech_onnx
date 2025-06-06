@@ -3,7 +3,7 @@ import logging
 import numpy as np
 import onnxruntime as ort
 import soundfile as sf
-import scipy.signal
+import librosa
 from fastapi import FastAPI, WebSocket, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -42,23 +42,34 @@ class Wav2Vec2ONNXModel:
         self.session = None
         self.emotion_labels = EMOTION_LABELS.get(model_type, EMOTION_LABELS["ehcalabres"])
         self.sample_rate = 16000
+        self.feature_extractor = None
         self.initialize_model()
     
     def initialize_model(self):
-        """Download and initialize ONNX model with correct URLs"""
+        """Download and initialize ONNX model with proper feature extraction"""
         try:
+            # Try to import transformers for proper feature extraction
+            try:
+                from transformers import Wav2Vec2FeatureExtractor
+                self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
+                    "facebook/wav2vec2-large-xlsr-53",
+                    sampling_rate=16000,
+                    do_normalize=True
+                )
+                logger.info("Loaded Wav2Vec2FeatureExtractor successfully")
+            except ImportError:
+                logger.warning("transformers not available, using manual preprocessing")
+                self.feature_extractor = None
+            
             model_urls = {
-                # Fixed URL - the ONNX files are in the root, not in onnx/ folder
                 "ehcalabres": "https://huggingface.co/ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition/resolve/main/model.onnx",
                 "msp_dim": "https://zenodo.org/record/6221127/files/model.onnx",
                 "iemocap": "https://huggingface.co/speechbrain/emotion-recognition-wav2vec2-IEMOCAP/resolve/main/model.onnx"
             }
             
-            # Alternative URLs in case the main one fails
             alternative_urls = {
                 "ehcalabres": [
                     "https://huggingface.co/ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition/resolve/caa9526cddb935a7f75cedb24478e8937bb2eaca/onnx/model.onnx",
-                    "https://huggingface.co/ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition/blob/main/onnx/model.onnx?download=true"
                 ]
             }
             
@@ -78,13 +89,11 @@ class Wav2Vec2ONNXModel:
             if not self.model_path.exists():
                 logger.info(f"Downloading {self.model_type} model...")
                 
-                # Try main URL first
                 try:
                     self.download_model(model_url, self.model_path)
                 except Exception as e:
                     logger.warning(f"Main URL failed: {e}")
                     
-                    # Try alternative URLs for ehcalabres
                     if self.model_type == "ehcalabres" and self.model_type in alternative_urls:
                         for alt_url in alternative_urls[self.model_type]:
                             try:
@@ -102,12 +111,19 @@ class Wav2Vec2ONNXModel:
             # Verify file before loading
             if not self.verify_onnx_file():
                 logger.error("Downloaded ONNX file is invalid")
-                self.model_path.unlink()  # Remove invalid file
+                self.model_path.unlink()
                 raise Exception("Invalid ONNX model")
             
-            # Load ONNX model
+            # Load ONNX model with optimized settings
             providers = ['CPUExecutionProvider']
-            self.session = ort.InferenceSession(str(self.model_path), providers=providers)
+            session_options = ort.SessionOptions()
+            session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            
+            self.session = ort.InferenceSession(
+                str(self.model_path), 
+                providers=providers,
+                sess_options=session_options
+            )
             
             logger.info(f"Successfully loaded {self.model_type} Wav2Vec2 ONNX model")
             logger.info(f"Model input: {self.session.get_inputs()[0].name}")
@@ -123,13 +139,11 @@ class Wav2Vec2ONNXModel:
             if not self.model_path.exists():
                 return False
             
-            # Check file size (should be > 100KB for real models)
             file_size = self.model_path.stat().st_size
-            if file_size < 100000:  # Less than 100KB is suspicious
+            if file_size < 100000:
                 logger.error(f"ONNX file too small: {file_size} bytes")
                 return False
             
-            # Try to create a test session
             test_session = ort.InferenceSession(str(self.model_path), providers=['CPUExecutionProvider'])
             logger.info(f"ONNX file verification successful ({file_size} bytes)")
             return True
@@ -139,9 +153,8 @@ class Wav2Vec2ONNXModel:
             return False
 
     def download_model(self, url, path):
-        """Enhanced download with better error handling"""
+        """Enhanced download with progress tracking"""
         try:
-            # Remove any existing file
             if path.exists():
                 path.unlink()
             
@@ -154,7 +167,6 @@ class Wav2Vec2ONNXModel:
             response = requests.get(url, stream=True, headers=headers, timeout=60)
             response.raise_for_status()
             
-            # Check content type
             content_type = response.headers.get('content-type', '')
             if 'text/html' in content_type:
                 raise Exception("Downloaded HTML page instead of ONNX model")
@@ -168,15 +180,13 @@ class Wav2Vec2ONNXModel:
                         f.write(chunk)
                         downloaded += len(chunk)
                         
-                        # Progress logging every 10MB
-                        if total_size > 0 and downloaded % (10 * 1024 * 1024) == 0:
+                        if total_size > 0 and downloaded % (1024 * 1024) == 0:  # Every 1MB
                             progress = (downloaded / total_size) * 100
                             logger.info(f"Download progress: {progress:.1f}%")
             
-            logger.info(f"Download completed: {path} ({downloaded} bytes)")
+            logger.info(f"Model downloaded successfully: {path}")
             
-            # Verify minimum file size
-            if downloaded < 100000:  # Less than 100KB
+            if downloaded < 100000:
                 raise Exception(f"Downloaded file too small: {downloaded} bytes")
             
         except Exception as e:
@@ -185,34 +195,6 @@ class Wav2Vec2ONNXModel:
                 path.unlink()
             raise
 
-
-    
-    def download_model(self, url, path):
-        """Download model file with progress"""
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0 (compatible; ONNX-downloader)'}
-            response = requests.get(url, stream=True, headers=headers)
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            
-            with open(path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0:
-                            progress = (downloaded / total_size) * 100
-                            if downloaded % (10 * 1024 * 1024) == 0:  # Log every 10MB
-                                logger.info(f"Download progress: {progress:.1f}%")
-            
-            logger.info(f"Model downloaded successfully: {path}")
-            
-        except Exception as e:
-            logger.error(f"Failed to download model: {e}")
-            raise
-    
     def create_mock_model(self):
         """Create mock model for testing"""
         class MockModel:
@@ -230,116 +212,122 @@ class Wav2Vec2ONNXModel:
                 return [MockOutput()]
             
             def run(self, output_names, input_dict):
-                # Generate realistic mock predictions
                 num_emotions = len(self.emotion_labels)
                 scores = np.random.dirichlet(np.ones(num_emotions))
                 return [scores.reshape(1, -1)]
         
         return MockModel(self.emotion_labels)
-
+    
     def preprocess_audio(self, audio_data, sample_rate=16000):
-        """Enhanced audio preprocessing for ehcalabres Wav2Vec2 model"""
-        if isinstance(audio_data, bytes):
-            audio_data = np.frombuffer(audio_data, dtype=np.float32)
-        
-        # Convert to mono if stereo
-        if len(audio_data.shape) > 1:
-            audio_data = audio_data.mean(axis=1)
-        
-        # Resample to 16kHz using high-quality resampling
-        if sample_rate != self.sample_rate:
-            from scipy import signal
-            audio_data = signal.resample_poly(
-                audio_data, 
-                self.sample_rate, 
-                sample_rate
-            )
-        
-        # Apply pre-emphasis filter to enhance high frequencies
-        audio_data = signal.lfilter([1, -0.97], [1], audio_data)
-        
-        # Normalize to [-1, 1] with better dynamic range
-        max_val = np.max(np.abs(audio_data))
-        if max_val > 0:
-            audio_data = audio_data / max_val
-            # Apply slight compression to enhance emotional features
-            audio_data = np.sign(audio_data) * (np.abs(audio_data) ** 0.8)
-        
-        # Remove silence from beginning and end
-        # Find non-silent regions (above 1% of max amplitude)
-        threshold = 0.01 * np.max(np.abs(audio_data))
-        non_silent = np.where(np.abs(audio_data) > threshold)[0]
-        
-        if len(non_silent) > 0:
-            start_idx = max(0, non_silent[0] - int(0.1 * self.sample_rate))  # Keep 0.1s before
-            end_idx = min(len(audio_data), non_silent[-1] + int(0.1 * self.sample_rate))  # Keep 0.1s after
-            audio_data = audio_data[start_idx:end_idx]
-        
-        # Ensure minimum length for reliable emotion recognition
-        min_length = int(2.0 * self.sample_rate)  # Increase to 2 seconds minimum
-        if len(audio_data) < min_length:
-            audio_data = np.pad(audio_data, (0, min_length - len(audio_data)))
-        
-        return audio_data.astype(np.float32)
-    def predict_emotion(self, audio_data, sample_rate=16000):
-        """Enhanced emotion prediction for ehcalabres model"""
+        """Proper preprocessing for ehcalabres Wav2Vec2 model"""
         try:
-            # Preprocess audio
+            if isinstance(audio_data, bytes):
+                audio_data = np.frombuffer(audio_data, dtype=np.float32)
+            
+            # Convert to mono if stereo
+            if len(audio_data.shape) > 1:
+                audio_data = audio_data.mean(axis=1)
+            
+            # Resample to 16kHz using librosa for better quality
+            if sample_rate != 16000:
+                audio_data = librosa.resample(
+                    audio_data, 
+                    orig_sr=sample_rate, 
+                    target_sr=16000,
+                    res_type='kaiser_fast'
+                )
+            
+            # Use transformers feature extractor if available
+            if self.feature_extractor is not None:
+                inputs = self.feature_extractor(
+                    audio_data, 
+                    sampling_rate=16000, 
+                    return_tensors="np",
+                    do_normalize=True,
+                    padding=True
+                )
+                return inputs.input_values[0]
+            else:
+                # Manual preprocessing as fallback
+                # Remove DC offset
+                audio_data = audio_data - np.mean(audio_data)
+                
+                # Apply pre-emphasis filter
+                pre_emphasis = 0.97
+                audio_data = np.append(audio_data[0], audio_data[1:] - pre_emphasis * audio_data[:-1])
+                
+                # Normalize to [-1, 1] with better dynamics
+                max_val = np.max(np.abs(audio_data))
+                if max_val > 0:
+                    audio_data = audio_data / max_val
+                
+                # Ensure minimum length
+                min_length = int(2.0 * 16000)  # 2 seconds
+                if len(audio_data) < min_length:
+                    audio_data = np.pad(audio_data, (0, min_length - len(audio_data)))
+                
+                # Limit maximum length
+                max_length = int(30 * 16000)  # 30 seconds
+                if len(audio_data) > max_length:
+                    audio_data = audio_data[:max_length]
+                
+                return audio_data.astype(np.float32)
+                
+        except Exception as e:
+            logger.error(f"Audio preprocessing failed: {e}")
+            # Return minimal valid input
+            return np.zeros(32000, dtype=np.float32)  # 2 seconds of silence
+    
+    def predict_emotion(self, audio_data, sample_rate=16000):
+        """Enhanced emotion prediction with proper preprocessing"""
+        try:
+            # Preprocess audio properly
             processed_audio = self.preprocess_audio(audio_data, sample_rate)
             
-            # Split long audio into chunks for better processing
-            chunk_duration = 10  # seconds
-            chunk_size = int(chunk_duration * self.sample_rate)
+            # Log input characteristics for debugging
+            logger.info(f"Processed audio shape: {processed_audio.shape}")
+            logger.info(f"Audio min/max: {np.min(processed_audio):.3f}/{np.max(processed_audio):.3f}")
+            logger.info(f"Audio mean/std: {np.mean(processed_audio):.3f}/{np.std(processed_audio):.3f}")
             
-            if len(processed_audio) > chunk_size:
-                # Process in overlapping chunks
-                chunks = []
-                overlap = int(chunk_size * 0.25)  # 25% overlap
-                
-                for i in range(0, len(processed_audio) - chunk_size + 1, chunk_size - overlap):
-                    chunk = processed_audio[i:i + chunk_size]
-                    chunks.append(chunk)
-                
-                # Add final chunk if needed
-                if len(processed_audio) % (chunk_size - overlap) != 0:
-                    chunks.append(processed_audio[-chunk_size:])
-                
-                # Process each chunk and average results
-                all_predictions = []
-                for chunk in chunks:
-                    input_data = {self.session.get_inputs()[0].name: chunk.reshape(1, -1)}
-                    outputs = self.session.run(None, input_data)
-                    all_predictions.append(outputs[0][0])
-                
-                # Average predictions across chunks
-                logits = np.mean(all_predictions, axis=0)
+            # Prepare input for ONNX model
+            input_name = self.session.get_inputs()[0].name
+            if len(processed_audio.shape) == 1:
+                input_data = {input_name: processed_audio.reshape(1, -1)}
             else:
-                # Process single chunk
-                input_data = {self.session.get_inputs()[0].name: processed_audio.reshape(1, -1)}
-                outputs = self.session.run(None, input_data)
-                logits = outputs[0][0]
+                input_data = {input_name: processed_audio}
             
-            # Apply temperature scaling to sharpen predictions
-            temperature = 0.8  # Lower temperature = sharper distribution
-            logits = logits / temperature
+            # Run ONNX inference
+            outputs = self.session.run(None, input_data)
+            logits = outputs[0]
             
-            # Apply softmax with numerical stability
-            exp_logits = np.exp(logits - np.max(logits))
-            scores = exp_logits / np.sum(exp_logits)
+            # Log raw logits for debugging
+            logger.info(f"Raw logits shape: {logits.shape}")
+            logger.info(f"Raw logits: {logits}")
             
-            # Apply confidence threshold
-            max_score = np.max(scores)
-            if max_score < 0.3:  # If no emotion is confident enough
-                # Use entropy-based adjustment
-                entropy = -np.sum(scores * np.log(scores + 1e-10))
-                max_entropy = np.log(len(scores))
-                confidence_factor = 1 - (entropy / max_entropy)
+            # Process logits based on model type
+            if self.model_type == "ehcalabres":
+                # Remove batch dimension if present
+                if len(logits.shape) > 1:
+                    logits = logits[0]
                 
-                # Boost the top prediction if confidence is reasonable
-                if confidence_factor > 0.4:
-                    top_idx = np.argmax(scores)
-                    scores[top_idx] *= 1.5
-                    scores = scores / np.sum(scores)  # Renormalize
+                # Apply temperature scaling for sharper predictions
+                temperature = 0.8
+                scaled_logits = logits / temperature
+                
+                # Apply softmax with numerical stability
+                exp_logits = np.exp(scaled_logits - np.max(scaled_logits))
+                scores = exp_logits / np.sum(exp_logits)
+                
+            elif self.model_type == "msp_dim":
+                scores = np.sigmoid(logits[0])
+            else:
+                # Default softmax
+                exp_logits = np.exp(logits - np.max(logits, axis=-1, keepdims=True))
+                scores = exp_logits / np.sum(exp_logits, axis=-1, keepdims=True)
+                scores = scores[0]
+            
+            # Log processed scores
+            logger.info(f"Processed scores: {scores}")
             
             # Create emotion mapping
             emotion_probs = {
@@ -347,8 +335,16 @@ class Wav2Vec2ONNXModel:
                 for emotion, score in zip(self.emotion_labels, scores)
             }
             
-            dominant_emotion = max(emotion_probs, key=emotion_probs.get)
-            confidence = emotion_probs[dominant_emotion]
+            # Get dominant emotion
+            if self.model_type == "msp_dim":
+                arousal, dominance, valence = scores[:3] if len(scores) >= 3 else [0.5, 0.5, 0.5]
+                dominant_emotion = self.interpret_dimensions(arousal, dominance, valence)
+                confidence = np.mean(scores[:3])
+            else:
+                dominant_emotion = max(emotion_probs, key=emotion_probs.get)
+                confidence = emotion_probs[dominant_emotion]
+            
+            logger.info(f"Dominant emotion: {dominant_emotion} (confidence: {confidence:.3f})")
             
             return {
                 "emotions": emotion_probs,
@@ -359,21 +355,20 @@ class Wav2Vec2ONNXModel:
                 "model_info": {
                     "architecture": "Wav2Vec2ForSequenceClassification",
                     "backend": "ONNX Runtime",
-                    "sample_rate": self.sample_rate,
-                    "audio_length": len(processed_audio) / self.sample_rate,
+                    "sample_rate": 16000,
+                    "audio_length": len(processed_audio) / 16000,
                     "model_source": "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition",
-                    "processing_method": "chunked" if len(processed_audio) > chunk_size else "single"
+                    "preprocessing": "transformers" if self.feature_extractor else "manual"
                 }
             }
             
         except Exception as e:
             logger.error(f"Wav2Vec2 prediction failed: {e}")
+            logger.error(traceback.format_exc())
             return self.fallback_result()
-
     
     def interpret_dimensions(self, arousal, dominance, valence):
         """Convert dimensional values to emotion categories"""
-        # Map to closest ehcalabres emotion categories
         if arousal > 0.6 and valence > 0.6:
             return "happy"
         elif arousal > 0.6 and valence < 0.4:
@@ -388,7 +383,7 @@ class Wav2Vec2ONNXModel:
             return "neutral"
     
     def fallback_result(self):
-        """Fallback emotion result matching ehcalabres labels"""
+        """Fallback emotion result"""
         fallback_emotions = {emotion: 1.0/len(self.emotion_labels) for emotion in self.emotion_labels}
         return {
             "emotions": fallback_emotions,
@@ -399,7 +394,7 @@ class Wav2Vec2ONNXModel:
             "model_type": f"fallback_{self.model_type}"
         }
 
-# Initialize model with ehcalabres as default
+# Initialize model
 try:
     emotion_model = Wav2Vec2ONNXModel("ehcalabres")
     logger.info("ehcalabres Wav2Vec2 emotion model initialized successfully")
@@ -474,7 +469,7 @@ async def analyze_audio(audio_file: UploadFile = File(...)):
 
 @app.get("/health")
 async def health_check():
-    """Enhanced health check with ehcalabres model info"""
+    """Health check with model info"""
     model_status = "available" if emotion_model else "unavailable"
     model_info = {
         "type": emotion_model.model_type if emotion_model else "none",
@@ -482,7 +477,8 @@ async def health_check():
         "source": "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition",
         "emotions": emotion_model.emotion_labels if emotion_model else [],
         "sample_rate": emotion_model.sample_rate if emotion_model else 0,
-        "accuracy": "82.23%" if emotion_model and emotion_model.model_type == "ehcalabres" else "unknown"
+        "accuracy": "82.23%" if emotion_model and emotion_model.model_type == "ehcalabres" else "unknown",
+        "feature_extractor": "loaded" if emotion_model and emotion_model.feature_extractor else "manual"
     }
     
     return JSONResponse(
@@ -496,7 +492,7 @@ async def health_check():
 
 @app.get("/models")
 async def list_models():
-    """List available emotion models with ehcalabres info"""
+    """List available emotion models"""
     return JSONResponse(
         content={
             "available_models": list(EMOTION_LABELS.keys()),
@@ -516,7 +512,7 @@ async def list_models():
 
 @app.get("/", response_class=HTMLResponse)
 async def get_web_interface():
-    """Updated web interface for ehcalabres model"""
+    """Web interface for emotion recognition"""
     return """
     <!DOCTYPE html>
     <html lang="en">
@@ -547,13 +543,13 @@ async def get_web_interface():
     <body>
         <div class="container">
             <h1>🎯 ehcalabres Wav2Vec2 Emotion Recognition</h1>
-            <p>State-of-the-art emotion recognition using the fine-tuned ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition model</p>
+            <p>Enhanced emotion recognition using proper preprocessing for the ehcalabres model</p>
             
-            <div id="statusIndicator" class="status warning">Initializing ehcalabres Wav2Vec2 model...</div>
+            <div id="statusIndicator" class="status warning">Initializing enhanced ehcalabres model...</div>
             
             <div class="model-info" id="modelInfo">
                 <h3>🧠 Model Information</h3>
-                <div id="modelDetails">Loading model details...</div>
+                <div id="modelDetails">Loading enhanced model details...</div>
             </div>
             
             <div class="file-input">
@@ -565,15 +561,15 @@ async def get_web_interface():
             <div class="results" id="resultsPanel">
                 <h3>🎭 Emotion Analysis Results</h3>
                 <div class="emotion-grid" id="emotionGrid">
-                    <div class="emotion-card">Upload an audio file to see emotion predictions...</div>
+                    <div class="emotion-card">Upload an audio file to see enhanced emotion predictions...</div>
                 </div>
                 <div id="dominantEmotion" style="font-size: 1.2em; font-weight: bold; margin: 10px 0;">Dominant: None</div>
                 <div id="confidence" style="font-size: 1.1em; margin: 10px 0;">Confidence: 0%</div>
-                <div id="modelUsed" style="font-size: 0.9em; color: #666; margin: 10px 0;">Model: ehcalabres (not analyzed)</div>
+                <div id="modelUsed" style="font-size: 0.9em; color: #666; margin: 10px 0;">Model: ehcalabres (enhanced preprocessing)</div>
             </div>
             
             <div class="log" id="logPanel">
-                <div>[System] Initializing ehcalabres Wav2Vec2 emotion recognition...</div>
+                <div>[System] Initializing enhanced ehcalabres Wav2Vec2 emotion recognition...</div>
             </div>
         </div>
 
@@ -587,7 +583,7 @@ async def get_web_interface():
 
             async function initializeApplication() {
                 try {
-                    logMessage('🔍 Checking ehcalabres Wav2Vec2 model status...', 'info');
+                    logMessage('🔍 Checking enhanced ehcalabres model status...', 'info');
                     
                     const response = await fetch('/health');
                     if (!response.ok) {
@@ -598,8 +594,9 @@ async def get_web_interface():
                     updateModelInfo(healthData.model_info);
                     
                     if (healthData.model_status === 'available') {
-                        updateStatus('✅ ehcalabres Wav2Vec2 model ready (82.23% accuracy)', 'success');
-                        logMessage(`Model loaded: ${healthData.model_info.source}`, 'success');
+                        updateStatus('✅ Enhanced ehcalabres model ready with proper preprocessing', 'success');
+                        logMessage(`Enhanced model loaded: ${healthData.model_info.source}`, 'success');
+                        logMessage(`Feature extraction: ${healthData.model_info.feature_extractor}`, 'info');
                         document.getElementById('analyzeBtn').disabled = false;
                     } else {
                         updateStatus('⚠️ Model unavailable - check installation', 'warning');
@@ -616,14 +613,15 @@ async def get_web_interface():
                 const modelDetails = document.getElementById('modelDetails');
                 if (modelInfo && modelInfo.type !== 'none') {
                     modelDetails.innerHTML = `
-                        <strong>Source:</strong> ${modelInfo.source || 'ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition'}<br>
+                        <strong>Source:</strong> ${modelInfo.source}<br>
                         <strong>Architecture:</strong> ${modelInfo.architecture}<br>
-                        <strong>Accuracy:</strong> ${modelInfo.accuracy || '82.23%'}<br>
+                        <strong>Accuracy:</strong> ${modelInfo.accuracy}<br>
                         <strong>Sample Rate:</strong> ${modelInfo.sample_rate}Hz<br>
+                        <strong>Preprocessing:</strong> ${modelInfo.feature_extractor || 'Enhanced manual'}<br>
                         <strong>Emotions:</strong> ${modelInfo.emotions.join(', ')}
                     `;
                 } else {
-                    modelDetails.innerHTML = 'ehcalabres model not loaded';
+                    modelDetails.innerHTML = 'Enhanced ehcalabres model not loaded';
                 }
             }
 
@@ -647,13 +645,13 @@ async def get_web_interface():
 
                 const analyzeBtn = document.getElementById('analyzeBtn');
                 analyzeBtn.disabled = true;
-                analyzeBtn.textContent = '🔄 Processing with ehcalabres...';
+                analyzeBtn.textContent = '🔄 Processing with enhanced preprocessing...';
 
                 try {
                     const formData = new FormData();
                     formData.append('audio_file', fileInput.files[0]);
 
-                    logMessage('📤 Uploading audio for ehcalabres analysis...', 'info');
+                    logMessage('📤 Uploading audio for enhanced ehcalabres analysis...', 'info');
                     const response = await fetch('/analyze_audio', {
                         method: 'POST',
                         body: formData
@@ -666,7 +664,7 @@ async def get_web_interface():
 
                     const result = await response.json();
                     displayResults(result.result);
-                    logMessage('✅ ehcalabres analysis completed successfully', 'success');
+                    logMessage('✅ Enhanced ehcalabres analysis completed successfully', 'success');
 
                 } catch (error) {
                     logMessage(`❌ Analysis failed: ${error.message}`, 'error');
@@ -683,7 +681,6 @@ async def get_web_interface():
                 const confidence = document.getElementById('confidence');
                 const modelUsed = document.getElementById('modelUsed');
                 
-                // Create emotion cards
                 let html = '';
                 emotions.forEach(emotion => {
                     const score = result.emotions[emotion] || 0;
@@ -708,7 +705,7 @@ async def get_web_interface():
                 confidence.textContent = `📊 Confidence: ${confidencePercent}%`;
                 
                 if (result.model_info) {
-                    modelUsed.textContent = `🧠 Model: ehcalabres (${result.model_info.audio_length?.toFixed(1)}s audio)`;
+                    modelUsed.textContent = `🧠 Model: ehcalabres enhanced (${result.model_info.audio_length?.toFixed(1)}s, ${result.model_info.preprocessing})`;
                 }
                 
                 logMessage(`🎯 Result: ${result.dominant_emotion} (${confidencePercent}% confidence)`, 'success');
@@ -747,5 +744,5 @@ async def get_web_interface():
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("Starting ehcalabres Wav2Vec2 emotion recognition server...")
+    logger.info("Starting enhanced ehcalabres Wav2Vec2 emotion recognition server...")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
