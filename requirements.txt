@@ -3,8 +3,8 @@ fastapi==0.104.1
 uvicorn[standard]==0.24.0
 
 # PyTorch (CPU only)
-torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu
-torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cpu
+torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu
+torchaudio==2.2.0 --index-url https://download.pytorch.org/whl/cpu
 transformers==4.35.0
 
 # Audio processing
@@ -16,5 +16,3 @@ numpy>=1.24.0,<2.0.0
 python-multipart
 onnxruntime
 librosa
-
-
